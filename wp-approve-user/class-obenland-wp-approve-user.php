@@ -33,6 +33,15 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	protected $options;
 
 	/**
+	 * Users flagged as pending.
+	 *
+	 * @since 12
+	 *
+	 * @var int
+	 */
+	protected $pending_count = 0;
+
+	/**
 	 * Users flagged as unapproved.
 	 *
 	 * @author Konstantin Obenland
@@ -42,6 +51,15 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @var    array
 	 */
 	protected $unapproved_users = array();
+
+	/**
+	 * Number of unapproved users.
+	 *
+	 * @since 12
+	 *
+	 * @var int
+	 */
+	protected $unapproved_count = 0;
 
 	/**
 	 * Constructor
@@ -66,16 +84,22 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 		);
 
 		if ( is_admin() ) {
+			/**
+			 * Get all users where wp-approve-user meta value is false or doesn't exist.
+			 */
 			$args = array(
+				'fields'     => 'ID',
 				'meta_key'   => 'wp-approve-user', //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
-				'meta_value' => false, //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+				'meta_value' => 'pending', //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
 			);
 
 			if ( is_multisite() ) {
 				$args['blog_id'] = is_network_admin() ? 0 : get_current_blog_id();
 			}
+			$this->pending_count = count( get_users( $args ) );
 
-			$this->unapproved_users = get_users( $args );
+			$args['meta_value']     = 'unapproved'; //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+			$this->unapproved_count = count( get_users( $args ) );
 		}
 
 		load_plugin_textdomain( 'wp-approve-user', false, 'wp-approve-user/lang' );
@@ -201,18 +225,29 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @return array
 	 */
 	public function views_users( $views ) {
-		if ( $this->unapproved_users ) {
-			// phpcs:ignore WordPress.Security.NonceVerification
-			$site_id = isset( $_REQUEST['id'] ) ? intval( $_REQUEST['id'] ) : 0;
-			$url     = 'site-users-network' === get_current_screen()->id ? add_query_arg( array( 'id' => $site_id ), 'site-users.php' ) : 'users.php';
+		// phpcs:ignore WordPress.Security.NonceVerification
+		$site_id = isset( $_REQUEST['id'] ) ? intval( $_REQUEST['id'] ) : 0;
+		$url     = 'site-users-network' === get_current_screen()->id ? add_query_arg( array( 'id' => $site_id ), 'site-users.php' ) : 'users.php';
 
+		if ( $this->pending_count ) {
+			$views['pending'] = sprintf(
+				'<a href="%1$s" class="%2$s">%3$s <span class="count">(%4$s)</span></a>',
+				esc_url( add_query_arg( array( 'role' => 'wpau_pending' ), $url ) ),
+				// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+				'wpau_pending' === $this->get_role() ? 'current' : '',
+				esc_html__( 'Pending', 'wp-approve-user' ),
+				$this->pending_count
+			);
+		}
+
+		if ( $this->unapproved_count ) {
 			$views['unapproved'] = sprintf(
 				'<a href="%1$s" class="%2$s">%3$s <span class="count">(%4$s)</span></a>',
 				esc_url( add_query_arg( array( 'role' => 'wpau_unapproved' ), $url ) ),
 				// phpcs:ignore WordPress.Security.NonceVerification.Recommended
 				'wpau_unapproved' === $this->get_role() ? 'current' : '',
-				esc_html__( 'Unapproved', 'wp-approve-users' ),
-				count( $this->unapproved_users )
+				esc_html__( 'Unapproved', 'wp-approve-user' ),
+				$this->unapproved_count
 			);
 		}
 
@@ -232,11 +267,21 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput
 		$role = empty( $query->query_vars['role'] ) && isset( $_REQUEST['role'] ) ? $_REQUEST['role'] : $query->query_vars['role'];
 
+		if ( 'wpau_pending' === $role ) {
+			unset( $query->query_vars['meta_query'] );
+			$query->query_vars['role']       = '';
+			$query->query_vars['meta_key']   = 'wp-approve-user'; //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+			$query->query_vars['meta_value'] = 'pending'; //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+
+			remove_filter( 'pre_user_query', array( $this, 'pre_user_query' ) );
+			$query->prepare_query();
+		}
+
 		if ( 'wpau_unapproved' === $role ) {
 			unset( $query->query_vars['meta_query'] );
 			$query->query_vars['role']       = '';
 			$query->query_vars['meta_key']   = 'wp-approve-user'; //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
-			$query->query_vars['meta_value'] = false; //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+			$query->query_vars['meta_value'] = 'unapproved'; //phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
 
 			remove_filter( 'pre_user_query', array( $this, 'pre_user_query' ) );
 			$query->prepare_query();
@@ -260,22 +305,10 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 			$site_id = isset( $_REQUEST['id'] ) ? intval( $_REQUEST['id'] ) : 0;
 			$url     = 'site-users-network' === get_current_screen()->id ? add_query_arg( array( 'id' => $site_id ), 'site-users.php' ) : 'users.php';
 
-			if ( get_user_meta( $user_object->ID, 'wp-approve-user', true ) ) {
-				$url = wp_nonce_url(
-					add_query_arg(
-						array(
-							'action' => 'wpau_unapprove',
-							'user'   => $user_object->ID,
-						),
-						$url
-					),
-					'wpau-unapprove-users'
-				);
+			$status = get_user_meta( $user_object->ID, 'wp-approve-user', true );
 
-				$actions['wpau-unapprove'] = sprintf( '<a class="submitunapprove" href="%1$s">%2$s</a>', esc_url( $url ), esc_html__( 'Unapprove', 'wp-approve-user' ) );
-
-			} else {
-				$url = wp_nonce_url(
+			if ( 'approved' !== $status ) {
+				$unapprove_url = wp_nonce_url(
 					add_query_arg(
 						array(
 							'action' => 'wpau_approve',
@@ -287,7 +320,23 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 					'wpau-approve-users'
 				);
 
-				$actions['wpau-approve'] = sprintf( '<a class="submitapprove" href="%1$s">%2$s</a>', esc_url( $url ), esc_html__( 'Approve', 'wp-approve-user' ) );
+				$actions['wpau-approve'] = sprintf( '<a class="submitapprove" href="%1$s">%2$s</a>', esc_url( $unapprove_url ), esc_html__( 'Approve', 'wp-approve-user' ) );
+			}
+
+			if ( 'unapproved' !== $status ) {
+				$approve_url = wp_nonce_url(
+					add_query_arg(
+						array(
+							'action' => 'wpau_unapprove',
+							'user'   => $user_object->ID,
+							'role'   => $this->get_role(),
+						),
+						$url
+					),
+					'wpau-unapprove-users'
+				);
+
+				$actions['wpau-unapprove'] = sprintf( '<a class="submitunapprove" href="%1$s">%2$s</a>', esc_url( $approve_url ), esc_html__( 'Unapprove', 'wp-approve-user' ) );
 			}
 		}
 
@@ -317,13 +366,13 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 			return $userdata;
 		}
 
-		if ( get_user_meta( $userdata->ID, 'wp-approve-user', true ) ) {
+		if ( 'approved' === get_user_meta( $userdata->ID, 'wp-approve-user', true ) ) {
 			return $userdata;
 		}
 
 		return new WP_Error(
 			'wpau_confirmation_error',
-			wp_kses_post( __( '<strong>ERROR:</strong> Your account has to be confirmed by an administrator before you can log in.', 'wp-approve-user' ) )
+			wp_kses_post( __( 'Your account must be confirmed before you can log in.', 'wp-approve-user' ) )
 		);
 	}
 
@@ -337,12 +386,17 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @param int $id User ID.
 	 */
 	public function user_register( $id ) {
-		update_user_meta( $id, 'wp-approve-user', current_user_can( 'create_users' ) );
+		$status = current_user_can( 'create_users' ) ? 'approved' : 'pending';
+
+		update_user_meta( $id, 'wp-approve-user', $status );
 		update_user_meta( $id, 'wp-approve-user-new-registration', true );
 	}
 
 	/**
 	 * Fires after a new user registration has been recorded.
+	 *
+	 * Prevents WordPress to send the new user notification email, if the user has to be approved first.
+	 * Still notifies the admin about the new user registration.
 	 *
 	 * @author Konstantin Obenland
 	 * @since  6 - 04.03.2019
@@ -351,7 +405,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @param int $user_id ID of the newly registered user.
 	 */
 	public function register_new_user( $user_id ) {
-		if ( ! get_user_meta( $user_id, 'wp-approve-user', true ) ) {
+		if ( 'pending' === get_user_meta( $user_id, 'wp-approve-user', true ) ) {
 			remove_action( 'register_new_user', 'wp_send_new_user_notifications' );
 			add_action( 'register_new_user', 'wp_new_user_notification' );
 		}
@@ -372,6 +426,8 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 		}
 
 		// phpcs:enable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput
+
+		wp_add_inline_style( 'list-tables', '.wp-list-table.users tbody th, .wp-list-table.users tbody td { box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.1); } #the-list .submitapprove { color:#007017; } #the-list .submitunapprove { color:#996800; }' );
 	}
 
 	/**
@@ -487,7 +543,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 */
 	public function wp_login_errors( $errors ) {
 		if ( in_array( 'registered', $errors->get_error_codes(), true ) ) {
-			$message = __( 'Registration complete. You will receive an email once your registration was confirmed by an administrator.', 'wp-approve-user' );
+			$message = __( 'Registration complete. You will receive an email once your registration is approved.', 'wp-approve-user' );
 			$errors->remove( 'registered' );
 			$errors->add( 'registered', $message, 'message' );
 		}
@@ -524,12 +580,8 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 
 			foreach ( $menu as $key => $menu_item ) {
 				if ( array_search( 'users.php', $menu_item, true ) ) {
-
-					// No need for number formatting, count() always returns an integer.
-					$awaiting_mod = count( $this->unapproved_users );
-
 					// phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited
-					$menu[ $key ][0] .= " <span class='update-plugins count-{$awaiting_mod}'><span class='plugin-count'>{$awaiting_mod}</span></span>";
+					$menu[ $key ][0] .= sprintf( ' <span class="update-plugins count-%1$s"><span class="plugin-count">%1$s</span></span>', $this->pending_count );
 
 					break; // Bail on success.
 				}
@@ -662,7 +714,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @access public
 	 */
 	public function section_description_cb() {
-		$tags = array( 'USERNAME', 'BLOG_TITLE', 'BLOG_URL', 'LOGINLINK' );
+		$tags = array( 'USERNAME', 'BLOG_TITLE', 'BLOG_URL', 'LOGINLINK', 'RESETLINK' );
 		if ( is_multisite() ) {
 			$tags[] = 'SITE_NAME';
 		}
@@ -774,9 +826,9 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 */
 	public function delete_user( $user_id ) {
 		$is_new_registration = get_user_meta( $user_id, 'wp-approve-user-new-registration', true );
-		$is_approved         = get_user_meta( $user_id, 'wp-approve-user', true );
+		$is_unapproved       = 'unapproved' === get_user_meta( $user_id, 'wp-approve-user', true );
 
-		if ( $is_new_registration && ! $is_approved && $this->options['wpau-send-unapprove-email'] ) {
+		if ( $is_new_registration && $is_unapproved && $this->options['wpau-send-unapprove-email'] ) {
 			$user     = new WP_User( $user_id );
 			$blogname = wp_specialchars_decode( get_option( 'blogname' ), ENT_QUOTES );
 
@@ -818,7 +870,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 
 			if ( ! current_user_can( 'edit_user', $id ) ) {
 				wp_die(
-					esc_html__( 'You can&#8217;t edit that user.' ),
+					esc_html__( 'You can&#8217;t edit that user.', 'wp-approve-user' ),
 					'',
 					array(
 						'back_link' => true,
@@ -826,22 +878,35 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 				);
 			}
 
-			update_user_meta( $id, 'wp-approve-user', true );
+			update_user_meta( $id, 'wp-approve-user', 'approved' );
+
+			/**
+			 * Fires after a user has been approved.
+			 *
+			 * @since 1.1.0
+			 *
+			 * @param int $id User ID.
+			 */
 			do_action( 'wpau_approve', $id );
 		}
 
-		wp_safe_redirect(
-			add_query_arg(
-				array(
-					'action' => 'wpau_update',
-					'update' => 'wpau-approved',
-					'count'  => count( $user_ids ),
-					'role'   => $this->get_role(),
-				),
-				$url
-			)
+		$role          = $this->get_role();
+		$count         = count( $user_ids );
+		$has_remaining = $this->has_remaining_users( $role, $count );
+		$query_args    = array(
+			'action' => 'wpau_update',
+			'update' => 'wpau-approved',
+			'count'  => $count,
 		);
+
+		if ( $has_remaining ) {
+			$query_args['role'] = $role;
+		}
+
+		wp_safe_redirect( add_query_arg( $query_args, $url ) );
+		// @codeCoverageIgnoreStart
 		exit();
+		// @codeCoverageIgnoreEnd
 	}
 
 	/**
@@ -859,7 +924,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 
 			if ( ! current_user_can( 'edit_user', $id ) ) {
 				wp_die(
-					esc_html__( 'You can&#8217;t edit that user.' ),
+					esc_html__( 'You can&#8217;t edit that user.', 'wp-approve-user' ),
 					'',
 					array(
 						'back_link' => true,
@@ -867,22 +932,37 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 				);
 			}
 
-			update_user_meta( $id, 'wp-approve-user', false );
+			update_user_meta( $id, 'wp-approve-user', 'unapproved' );
+			WP_Session_Tokens::get_instance( $id )->destroy_all();
+
+			/**
+			 * Fires after a user has been unapproved.
+			 *
+			 * @since 1.1.0
+			 *
+			 * @param int $id User ID.
+			 */
 			do_action( 'wpau_unapprove', $id );
 		}
 
-		wp_safe_redirect(
-			add_query_arg(
-				array(
-					'action' => 'wpau_update',
-					'update' => 'wpau-unapproved',
-					'count'  => count( $user_ids ),
-					'role'   => $this->get_role(),
-				),
-				$url
-			)
+		$role          = $this->get_role();
+		$count         = count( $user_ids );
+		$has_remaining = $this->has_remaining_users( $role, $count );
+		$query_args    = array(
+			'action' => 'wpau_update',
+			'update' => 'wpau-unapproved',
+			'count'  => $count,
 		);
+
+		// Special case: If someone unapproves all unapproved users, we want to stay on the unapproved list.
+		if ( $has_remaining || 'wpau_unapproved' === $role ) {
+			$query_args['role'] = $role;
+		}
+
+		wp_safe_redirect( add_query_arg( $query_args, $url ) );
+		// @codeCoverageIgnoreStart
 		exit();
+		// @codeCoverageIgnoreEnd
 	}
 
 	/**
@@ -909,7 +989,9 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 
 		if ( empty( $_REQUEST[ $users_key ] ) ) {
 			wp_safe_redirect( $url );
+			// @codeCoverageIgnoreStart
 			exit();
+			// @codeCoverageIgnoreEnd
 		}
 
 		if ( ! current_user_can( 'promote_users' ) ) {
@@ -949,6 +1031,22 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 			'LOGINLINK'  => wp_login_url(),
 			'USERNAME'   => $user->user_nicename,
 		);
+
+		if ( false !== strpos( $message, 'RESETLINK' ) ) {
+			$key = get_password_reset_key( $user );
+			if ( ! is_wp_error( $key ) ) {
+				$placeholders['RESETLINK'] = add_query_arg(
+					array(
+						'action' => 'rp',
+						'key'    => $key,
+						'login'  => rawurlencode( $user->user_login ),
+					),
+					network_site_url( 'wp-login.php', 'login' )
+				);
+			} else {
+				$placeholders['RESETLINK'] = wp_login_url();
+			}
+		}
 
 		if ( is_multisite() ) {
 			$placeholders['SITE_NAME'] = $GLOBALS['current_site']->site_name;
@@ -1019,7 +1117,7 @@ Contact details',
 		// phpcs:disable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput
 
 		if ( empty( $_REQUEST['role'] ) && ! empty( $_REQUEST['_wp_http_referer'] ) ) {
-			$referrer = parse_url( $_REQUEST['_wp_http_referer'] ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url
+			$referrer = wp_parse_url( $_REQUEST['_wp_http_referer'] );
 
 			if ( ! empty( $referrer['query'] ) ) {
 				$args = wp_parse_args( $referrer['query'] );
@@ -1047,6 +1145,7 @@ Contact details',
 	protected function get_role() {
 		$roles   = array_keys( get_editable_roles() );
 		$roles[] = 'wpau_unapproved';
+		$roles[] = 'wpau_pending';
 		$role    = false;
 
 		if ( isset( $_REQUEST['role'] ) && in_array( $_REQUEST['role'], $roles, true ) ) {
@@ -1056,6 +1155,29 @@ Contact details',
 		return $role;
 
 		// phpcs:enable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput
+	}
+
+	/**
+	 * Checks if there are remaining users to approve/unapprove.
+	 *
+	 * This function is used to determine if the user should be redirected back
+	 * to the all user view or to the role-specific view after approving/unapproving users.
+	 *
+	 * @param string $role  Role key.
+	 * @param int    $count Number of users approved/unapproved.
+	 * @return int Number of remaining users.
+	 */
+	protected function has_remaining_users( $role, $count ) {
+		// If we're in a role context outside of our custom roles, always redirect back to the role view.
+		$has_remaining = ! in_array( $role, array( 'wpau_pending', 'wpau_unapproved' ), true );
+
+		if ( 'wpau_pending' === $role ) {
+			$has_remaining = $this->pending_count - $count;
+		} elseif ( 'wpau_unapproved' === $role ) {
+			$has_remaining = $this->unapproved_count - $count;
+		}
+
+		return $has_remaining;
 	}
 
 	/**
@@ -1069,10 +1191,10 @@ Contact details',
 	 * @deprecated 2.3.0 - 13.08.2013
 	 * @access     public
 	 *
-	 * @param string $old Old settings value.
-	 * @param int    $new New settings value.
+	 * @param string $old       Old settings value.
+	 * @param int    $new_value New settings value.
 	 */
-	public function update_option_users_can_register( $old, $new ) {
+	public function update_option_users_can_register( $old, $new_value ) {
 		_deprecated_function( __FUNCTION__, '2.3' );
 	}
 
