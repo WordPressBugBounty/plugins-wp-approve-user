@@ -5,7 +5,7 @@ Donate link: https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_i
 Requires at least: 4.7
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 12
+Stable tag: 13
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -79,11 +79,22 @@ Yes! Under Settings > Approve User, you can choose when to send an email and cus
 
 == Upgrade Notice ==
 
+= 13 =
+Adds a richer Pending User Approvals dashboard widget with inline approve/reject actions and rule-based auto-approval for trusted email domains, suffixes, and IP ranges.
+
 = 12 =
 Migrates user approval data to a three-state system and adds a RESETLINK email placeholder. Back up before upgrading large installs.
 
 
 == Changelog ==
+
+= 13 =
+* Pending User Approvals dashboard widget now lists up to five pending users with inline Approve and Reject buttons that act via AJAX without leaving the dashboard.
+* Adds a rule-based auto-approval feature so admins can allow registrations from trusted email domains, suffixes, and IP ranges.
+* Extends the core "New User Registration" admin email with a link to the pending users screen when a registration needs approval.
+* Registers the `wp-approve-user/approve` and `wp-approve-user/unapprove` abilities via the WP Abilities API so MCP clients and other integrations can drive the approval flow.
+* Fixes a silent lockout where users with no `wp-approve-user` meta (e.g. pre-existing users on sites that enabled registration after install) were blocked from wp-admin without any feedback.
+* Restores compatibility with third-party integrations (e.g. Restrict Content Pro) that still call `update_user_meta( $id, 'wp-approve-user', true|false )` by coercing legacy boolean writes to the V12 three-state strings.
 
 = 12 =
 * Bumped minimum required WordPress version to 4.7.
