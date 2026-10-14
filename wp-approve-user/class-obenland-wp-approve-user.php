@@ -204,6 +204,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 		$this->hook( 'user_row_actions' );
 		$this->hook( 'ms_user_row_actions', 'user_row_actions' );
 		$this->hook( 'wp_authenticate_user' );
+		$this->hook( 'wp_authenticate_application_password_errors' );
 		$this->hook( 'user_register', 5, 'capture_registration_ip' );
 		$this->hook( 'user_register' );
 		$this->hook( 'user_register', 20, 'auto_approve_user' );
@@ -411,20 +412,58 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @return WP_User|WP_Error
 	 */
 	public function wp_authenticate_user( $userdata ) {
-		if ( is_wp_error( $userdata ) ) {
+		if ( is_wp_error( $userdata ) || $this->user_is_approved( $userdata ) ) {
 			return $userdata;
 		}
 
-		if ( get_bloginfo( 'admin_email' ) === $userdata->user_email ) {
-			return $userdata;
+		return new WP_Error(
+			'wpau_confirmation_error',
+			esc_html__( 'Your account must be confirmed before you can log in.', 'wp-approve-user' )
+		);
+	}
+
+	/**
+	 * Applies the approval gate to Application Password authentication.
+	 *
+	 * Core authenticates Application Passwords (REST, XML-RPC) on a separate
+	 * path that never runs `wp_authenticate_user`. The hook is an action, so
+	 * the error object is mutated in place.
+	 *
+	 * @since 14
+	 * @access public
+	 *
+	 * @param WP_Error $error Collected authentication errors.
+	 * @param WP_User  $user  User being authenticated.
+	 */
+	public function wp_authenticate_application_password_errors( $error, $user ) {
+		if ( ! $this->user_is_approved( $user ) ) {
+			$error->add(
+				'wpau_confirmation_error',
+				esc_html__( 'Your account must be confirmed before you can log in.', 'wp-approve-user' )
+			);
+		}
+	}
+
+	/**
+	 * Determines whether a user has cleared the approval gate.
+	 *
+	 * @since 14
+	 * @access protected
+	 *
+	 * @param  WP_User $user User to check.
+	 * @return bool
+	 */
+	protected function user_is_approved( $user ) {
+		if ( get_bloginfo( 'admin_email' ) === $user->user_email ) {
+			return true;
 		}
 
-		if ( is_super_admin( $userdata->ID ) ) {
-			return $userdata;
+		if ( is_super_admin( $user->ID ) ) {
+			return true;
 		}
 
-		$status          = get_user_meta( $userdata->ID, 'wp-approve-user', true );
-		$has_status_meta = metadata_exists( 'user', $userdata->ID, 'wp-approve-user' );
+		$status          = get_user_meta( $user->ID, 'wp-approve-user', true );
+		$has_status_meta = metadata_exists( 'user', $user->ID, 'wp-approve-user' );
 
 		/*
 		 * A missing meta row means the user predates the plugin (or its
@@ -432,14 +471,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 		 * approved; an existing empty value may represent a legacy
 		 * pre-v12 pending state that hasn't been migrated yet.
 		 */
-		if ( 'approved' === $status || ! $has_status_meta ) {
-			return $userdata;
-		}
-
-		return new WP_Error(
-			'wpau_confirmation_error',
-			wp_kses_post( __( 'Your account must be confirmed before you can log in.', 'wp-approve-user' ) )
-		);
+		return 'approved' === $status || ! $has_status_meta;
 	}
 
 	/**
@@ -709,13 +741,28 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @access public
 	 */
 	public function map_action2() {
-		// phpcs:disable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
 
-		if ( ! empty( $_REQUEST['action2'] ) && false !== stripos( $_REQUEST['action2'], 'wpau_' ) ) {
-			do_action( "admin_action_{$_REQUEST['action2']}" );
+		if ( ! empty( $_REQUEST['action2'] ) ) {
+			$raw = wp_unslash( $_REQUEST['action2'] );
+
+			/*
+			 * Reject array input (`?action2[]=foo`) outright — `strtolower()`
+			 * would TypeError on PHP 8+. Then reject anything sanitize_key()
+			 * had to rewrite; case-only differences are fine because
+			 * sanitize_key() lowercases. Dispatching the normalised form would
+			 * let `wpau_<script>` slip through as `wpau_script`, defeating
+			 * the prefix gate.
+			 */
+			if ( is_string( $raw ) ) {
+				$action = sanitize_key( $raw );
+				if ( strtolower( $raw ) === $action && 0 === strpos( $action, 'wpau_' ) ) {
+					do_action( "admin_action_{$action}" );
+				}
+			}
 		}
 
-		// phpcs:enable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput
+		// phpcs:enable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
 
 		wp_add_inline_style( 'list-tables', '.wp-list-table.users tbody th, .wp-list-table.users tbody td { box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.1); } #the-list .submitapprove { color:#007017; } #the-list .submitunapprove { color:#996800; }' );
 	}
@@ -782,14 +829,24 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 	 * @access public
 	 */
 	public function admin_action_wpau_update() {
-		// phpcs:disable WordPress.Security.ValidatedSanitizedInput, WordPress.Security.NonceVerification.Recommended
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
 		if ( empty( $_REQUEST['update'] ) ) {
 			return;
 		}
 
-		$count = absint( $_REQUEST['count'] );
+		$raw = wp_unslash( $_REQUEST['update'] );
+		if ( ! is_string( $raw ) ) {
+			return;
+		}
 
-		switch ( $_REQUEST['update'] ) {
+		$update = sanitize_key( $raw );
+		if ( '' === $update ) {
+			return;
+		}
+
+		$count = isset( $_REQUEST['count'] ) ? absint( $_REQUEST['count'] ) : 0;
+
+		switch ( $update ) {
 			case 'wpau-approved':
 				/* translators: Number of users. */
 				$message = esc_html( _n( '%d User approved.', '%d users approved.', $count, 'wp-approve-user' ) );
@@ -801,13 +858,13 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 				break;
 
 			default:
-				$message = apply_filters( 'wpau_update_message_handler', '', $_REQUEST['update'] );
+				$message = apply_filters( 'wpau_update_message_handler', '', $update );
 		}
 
 		if ( isset( $message ) ) {
 			add_settings_error(
 				$this->textdomain,
-				esc_attr( $_REQUEST['update'] ),
+				$update,
 				sprintf( $message, $count ),
 				'updated'
 			);
@@ -818,7 +875,7 @@ class Obenland_Wp_Approve_User extends Obenland_Wp_Plugins_V5 {
 		// Prevent other admin action handlers from trying to handle our action.
 		$_REQUEST['action'] = -1;
 
-		// phpcs:enable WordPress.Security.ValidatedSanitizedInput, WordPress.Security.NonceVerification.Recommended
+		// phpcs:enable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
 	}
 
 	/**
